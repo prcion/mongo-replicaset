@@ -1,0 +1,142 @@
+#!/bin/bash
+
+# MongoDB ReplicaSet Configuration Script
+# Run this script on the primary server after installing MongoDB on all servers
+
+# Load environment variables if .env file exists
+if [ -f ".env" ]; then
+    echo "Loading configuration from .env file..."
+    export $(grep -v '^#' .env | xargs)
+else
+    echo "No .env file found. Please create one or specify the required variables."
+    exit 1
+fi
+
+# Verify required variables are set
+REQUIRED_VARS="REPLICA_SET_NAME SERVER1 SERVER2 SERVER3 MONGO_PORT ADMIN_USER ADMIN_PASSWORD APP_USER APP_PASSWORD APP_DATABASE"
+MISSING_VARS=0
+
+for VAR in $REQUIRED_VARS; do
+    if [ -z "${!VAR}" ]; then
+        echo "Error: $VAR is not set. Please add it to your .env file."
+        MISSING_VARS=1
+    fi
+done
+
+if [ $MISSING_VARS -eq 1 ]; then
+    exit 1
+fi
+
+# Function to check if command succeeded
+check_status() {
+    if [ $? -ne 0 ]; then
+        echo "Error: $1"
+        exit 1
+    fi
+}
+
+echo "===== Configuring MongoDB Replica Set '$REPLICA_SET_NAME' ====="
+echo "Primary server: $SERVER1:$MONGO_PORT"
+echo "Secondary servers: $SERVER2:$MONGO_PORT, $SERVER3:$MONGO_PORT"
+
+# Check if MongoDB is running
+echo "Checking MongoDB service status..."
+if ! pgrep mongod > /dev/null; then
+    echo "MongoDB is not running. Starting service..."
+    sudo systemctl start mongod
+    check_status "Failed to start MongoDB service"
+    sleep 5  # Give MongoDB time to start
+fi
+
+# Create JS file for replica set configuration
+echo "Creating replica set initialization script..."
+cat > /tmp/rs_init.js << EOF
+// ReplicaSet configuration
+rs.initiate({
+  _id: "$REPLICA_SET_NAME",
+  members: [
+    { _id: 0, host: "$SERVER1:$MONGO_PORT", priority: 2 },
+    { _id: 1, host: "$SERVER2:$MONGO_PORT", priority: 1 },
+    { _id: 2, host: "$SERVER3:$MONGO_PORT", priority: 1 }
+  ]
+});
+
+// Wait for the replica set to initialize
+print("Waiting for replica set initialization...");
+sleep(5000);
+
+// Check replica set status
+rs.status();
+EOF
+
+# Execute the configuration
+echo "Initializing replica set..."
+mongo --host localhost:$MONGO_PORT /tmp/rs_init.js
+check_status "Failed to initialize replica set"
+
+# Wait for primary election
+echo "Waiting for primary election..."
+sleep 10
+
+# Create admin user and application user
+echo "Creating users and setting up authentication..."
+cat > /tmp/create_users.js << EOF
+// Connect to admin database
+use admin;
+
+// Create admin user
+db.createUser({
+  user: "$ADMIN_USER",
+  pwd: "$ADMIN_PASSWORD",
+  roles: [
+    { role: "userAdminAnyDatabase", db: "admin" },
+    { role: "clusterAdmin", db: "admin" },
+    { role: "root", db: "admin" }
+  ]
+});
+
+// Create application database and user
+use $APP_DATABASE;
+
+db.createUser({
+  user: "$APP_USER",
+  pwd: "$APP_PASSWORD",
+  roles: [
+    { role: "readWrite", db: "$APP_DATABASE" }
+  ]
+});
+
+// Create a test collection
+db.testCollection.insertOne({ name: "Test Document", createdAt: new Date() });
+EOF
+
+mongo --host localhost:$MONGO_PORT /tmp/create_users.js
+check_status "Failed to create users"
+
+# Enable security
+echo "Enabling security in MongoDB configuration..."
+sudo sed -i 's/#security:/security:/' /etc/mongod.conf
+sudo sed -i 's/#  authorization: "enabled"/  authorization: "enabled"/' /etc/mongod.conf
+
+# If the sed commands didn't make the changes, add them explicitly
+if ! grep -q "security:" /etc/mongod.conf; then
+    echo -e "\n# Security configuration\nsecurity:\n  authorization: \"enabled\"" | sudo tee -a /etc/mongod.conf
+fi
+
+# Restart MongoDB
+echo "Restarting MongoDB to apply security settings..."
+sudo systemctl restart mongod
+check_status "Failed to restart MongoDB"
+
+# Clean up temporary files
+rm -f /tmp/rs_init.js /tmp/create_users.js
+
+echo "===== Replica Set Configuration Completed Successfully! ====="
+echo ""
+echo "Connection string for MongoDB clients:"
+echo "mongodb://$APP_USER:$APP_PASSWORD@$SERVER1:$MONGO_PORT,$SERVER2:$MONGO_PORT,$SERVER3:$MONGO_PORT/$APP_DATABASE?replicaSet=$REPLICA_SET_NAME"
+echo ""
+echo "To test the replica set:"
+echo "  mongo mongodb://$SERVER1:$MONGO_PORT,$SERVER2:$MONGO_PORT,$SERVER3:$MONGO_PORT/$APP_DATABASE?replicaSet=$REPLICA_SET_NAME -u $APP_USER -p $APP_PASSWORD --authenticationDatabase $APP_DATABASE"
+echo ""
+echo "Next step: Run generate-spring-config.sh to create Spring Boot configuration files."
