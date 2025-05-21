@@ -5,9 +5,77 @@
 # Run this script on the primary server after installing MongoDB on all servers
 
 
+# Function to configure MongoDB for replication
+configure_mongodb_for_replication() {
+    local config_file="/etc/mongod.conf"
+    local needs_restart=false
+    
+    echo "Checking MongoDB configuration for replication settings..."
+    
+    # Create a backup of the original config if it doesn't exist
+    if [ ! -f "${config_file}.original" ]; then
+        sudo cp "$config_file" "${config_file}.original"
+        echo "Created backup of original MongoDB configuration at ${config_file}.original"
+    fi
+    
+    # Check for replication configuration
+    if ! grep -q "replSetName: $REPLICA_SET_NAME" "$config_file"; then
+        echo "Adding replication configuration..."
+        
+        # Check if replication section exists
+        if grep -q "^replication:" "$config_file"; then
+            # Add replSetName to existing replication section
+            sudo sed -i "/^replication:/a\\  replSetName: $REPLICA_SET_NAME" "$config_file"
+        else
+            # Add new replication section
+            echo -e "\n# replication section\nreplication:\n  replSetName: $REPLICA_SET_NAME" | sudo tee -a "$config_file" > /dev/null
+        fi
+        needs_restart=true
+    fi
+    
+    # Check for network configuration - bindIp and port
+    if ! grep -q "bindIp: 0.0.0.0" "$config_file"; then
+        echo "Configuring bindIp setting..."
+        
+        if grep -q "^net:" "$config_file"; then
+            # Add bindIp to existing net section
+            sudo sed -i "/^net:/a\\  bindIp: 0.0.0.0" "$config_file"
+        else
+            # We'll add the complete net section below
+            echo -e "\n# network interfaces\nnet:\n  port: $MONGO_PORT\n  bindIp: 0.0.0.0" | sudo tee -a "$config_file" > /dev/null
+            needs_restart=true
+            return
+        fi
+        needs_restart=true
+    fi
+    
+    # Check if port needs to be configured
+    if ! grep -q "port: $MONGO_PORT" "$config_file"; then
+        echo "Configuring MongoDB port setting..."
+        
+        if grep -q "^net:" "$config_file"; then
+            # Add port to existing net section
+            sudo sed -i "/^net:/a\\  port: $MONGO_PORT" "$config_file"
+        else
+            # Add complete new net section (this should be caught by previous check)
+            echo -e "\n# network interfaces\nnet:\n  port: $MONGO_PORT\n  bindIp: 0.0.0.0" | sudo tee -a "$config_file" > /dev/null
+        fi
+        needs_restart=true
+    fi
+    
+    # Restart MongoDB if any changes were made
+    if [ "$needs_restart" = true ]; then
+        echo "Configuration changed. Restarting MongoDB service..."
+        sudo systemctl restart mongod
+        check_status "Failed to restart MongoDB after configuration update"
+        sleep 5  # Give MongoDB time to restart
+    else
+        echo "MongoDB is already properly configured for replication."
+    fi
+}
+
 
 # Load environment variables if .env file exists
-
 if [ -f ".env" ]; then
 
     echo "Loading configuration from .env file..."
@@ -94,7 +162,8 @@ if ! pgrep mongod > /dev/null; then
 
 fi
 
-
+# Configure MongoDB for replication if needed
+configure_mongodb_for_replication
 
 # Fix: Check for MongoDB tools
 
