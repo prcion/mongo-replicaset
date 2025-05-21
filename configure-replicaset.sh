@@ -95,11 +95,11 @@ check_status "Failed to initialize replica set"
 echo "Waiting for primary election..."
 sleep 10
 
-# Create admin user and application user
+# Create admin user and application user - FIX FOR MONGOSH COMPATIBILITY
 echo "Creating users and setting up authentication..."
 cat > /tmp/create_users.js << EOF
 // Connect to admin database
-use admin;
+db = db.getSiblingDB('admin');
 
 // Create admin user
 db.createUser({
@@ -113,7 +113,7 @@ db.createUser({
 });
 
 // Create application database and user
-use $APP_DATABASE;
+db = db.getSiblingDB('$APP_DATABASE');
 db.createUser({
   user: "$APP_USER",
   pwd: "$APP_PASSWORD",
