@@ -1,12 +1,12 @@
 #!/bin/bash
-
 # MongoDB ReplicaSet Configuration Script
 # Run this script on the primary server after installing MongoDB on all servers
 
 # Load environment variables if .env file exists
 if [ -f ".env" ]; then
     echo "Loading configuration from .env file..."
-    export $(grep -v '^#' .env | xargs)
+    # Fix: Only export non-comment lines properly
+    export $(grep -v '^#' .env | xargs -0 | tr '\0' '\n')
 else
     echo "No .env file found. Please create one or specify the required variables."
     exit 1
@@ -15,7 +15,6 @@ fi
 # Verify required variables are set
 REQUIRED_VARS="REPLICA_SET_NAME SERVER1 SERVER2 SERVER3 MONGO_PORT ADMIN_USER ADMIN_PASSWORD APP_USER APP_PASSWORD APP_DATABASE"
 MISSING_VARS=0
-
 for VAR in $REQUIRED_VARS; do
     if [ -z "${!VAR}" ]; then
         echo "Error: $VAR is not set. Please add it to your .env file."
@@ -48,6 +47,24 @@ if ! pgrep mongod > /dev/null; then
     sleep 5  # Give MongoDB time to start
 fi
 
+# Fix: Check for MongoDB tools
+MONGO_CMD="mongo"
+MONGOSH_CMD="mongosh"
+
+if command -v mongosh &> /dev/null; then
+    # New MongoDB installations use mongosh
+    MONGO_CLIENT="$MONGOSH_CMD"
+    echo "Using mongosh client..."
+elif command -v mongo &> /dev/null; then
+    # Legacy MongoDB installations use mongo
+    MONGO_CLIENT="$MONGO_CMD"
+    echo "Using mongo client..."
+else
+    echo "Error: MongoDB client not found. Please install MongoDB tools or ensure they are in your PATH."
+    echo "For newer MongoDB versions, install 'mongosh'. For older versions, make sure 'mongo' is installed."
+    exit 1
+fi
+
 # Create JS file for replica set configuration
 echo "Creating replica set initialization script..."
 cat > /tmp/rs_init.js << EOF
@@ -71,7 +88,7 @@ EOF
 
 # Execute the configuration
 echo "Initializing replica set..."
-mongo --host localhost:$MONGO_PORT /tmp/rs_init.js
+$MONGO_CLIENT --host localhost:$MONGO_PORT /tmp/rs_init.js
 check_status "Failed to initialize replica set"
 
 # Wait for primary election
@@ -97,7 +114,6 @@ db.createUser({
 
 // Create application database and user
 use $APP_DATABASE;
-
 db.createUser({
   user: "$APP_USER",
   pwd: "$APP_PASSWORD",
@@ -110,17 +126,22 @@ db.createUser({
 db.testCollection.insertOne({ name: "Test Document", createdAt: new Date() });
 EOF
 
-mongo --host localhost:$MONGO_PORT /tmp/create_users.js
+$MONGO_CLIENT --host localhost:$MONGO_PORT /tmp/create_users.js
 check_status "Failed to create users"
 
 # Enable security
 echo "Enabling security in MongoDB configuration..."
-sudo sed -i 's/#security:/security:/' /etc/mongod.conf
-sudo sed -i 's/#  authorization: "enabled"/  authorization: "enabled"/' /etc/mongod.conf
-
-# If the sed commands didn't make the changes, add them explicitly
-if ! grep -q "security:" /etc/mongod.conf; then
-    echo -e "\n# Security configuration\nsecurity:\n  authorization: \"enabled\"" | sudo tee -a /etc/mongod.conf
+# Check if the mongod.conf file exists
+if [ -f "/etc/mongod.conf" ]; then
+    sudo sed -i 's/#security:/security:/' /etc/mongod.conf
+    sudo sed -i 's/#  authorization: "enabled"/  authorization: "enabled"/' /etc/mongod.conf
+    
+    # If the sed commands didn't make the changes, add them explicitly
+    if ! grep -q "security:" /etc/mongod.conf; then
+        echo -e "\n# Security configuration\nsecurity:\n  authorization: \"enabled\"" | sudo tee -a /etc/mongod.conf
+    fi
+else
+    echo "Warning: mongod.conf not found in expected location. You may need to manually enable authentication."
 fi
 
 # Restart MongoDB
@@ -137,6 +158,6 @@ echo "Connection string for MongoDB clients:"
 echo "mongodb://$APP_USER:$APP_PASSWORD@$SERVER1:$MONGO_PORT,$SERVER2:$MONGO_PORT,$SERVER3:$MONGO_PORT/$APP_DATABASE?replicaSet=$REPLICA_SET_NAME"
 echo ""
 echo "To test the replica set:"
-echo "  mongo mongodb://$SERVER1:$MONGO_PORT,$SERVER2:$MONGO_PORT,$SERVER3:$MONGO_PORT/$APP_DATABASE?replicaSet=$REPLICA_SET_NAME -u $APP_USER -p $APP_PASSWORD --authenticationDatabase $APP_DATABASE"
+echo "  $MONGO_CLIENT mongodb://$SERVER1:$MONGO_PORT,$SERVER2:$MONGO_PORT,$SERVER3:$MONGO_PORT/$APP_DATABASE?replicaSet=$REPLICA_SET_NAME -u $APP_USER -p $APP_PASSWORD --authenticationDatabase $APP_DATABASE"
 echo ""
 echo "Next step: Run generate-spring-config.sh to create Spring Boot configuration files."
